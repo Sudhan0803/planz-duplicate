@@ -11,6 +11,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <style>
       body {
         font-family: 'Inter', sans-serif;
@@ -68,19 +69,1449 @@
 {
   "imports": {
     "@google/genai": "https://aistudiocdn.com/@google/genai@^1.22.0",
-    "react/": "https://aistudiocdn.com/react@^19.2.0/",
     "react": "https://aistudiocdn.com/react@^19.2.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
-    "firebase/": "https://aistudiocdn.com/firebase@^12.3.0/",
-    "@firebase/firestore": "https://aistudiocdn.com/@firebase/firestore@^4.9.2",
+    "react-dom/client": "https://aistudiocdn.com/react-dom@^19.2.0/client",
+    "firebase/app": "https://aistudiocdn.com/firebase@^12.3.0/app",
+    "firebase/auth": "https://aistudiocdn.com/firebase@^12.3.0/auth",
+    "firebase/firestore": "https://aistudiocdn.com/firebase@^12.3.0/firestore",
+    "@firebase/app": "https://aistudiocdn.com/@firebase/app@^0.14.3",
     "@firebase/auth": "https://aistudiocdn.com/@firebase/auth@^1.11.0",
-    "@firebase/app": "https://aistudiocdn.com/@firebase/app@^0.14.3"
+    "@firebase/firestore": "https://aistudiocdn.com/@firebase/firestore@^4.9.2",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "firebase/": "https://aistudiocdn.com/firebase@^12.3.0/"
   }
 }
 </script>
 </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="./index.tsx"></script>
+    <script type="text/babel" data-type="module">
+// =================================================================================
+// Plan Z - Single-File Bundled Application
+// All TSX/TS files have been combined into this script and are transpiled
+// in the browser by Babel Standalone.
+// =================================================================================
+
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import ReactDOM from 'react-dom/client';
+import { GoogleGenAI, Type } from "@google/genai";
+import { initializeApp } from "firebase/app";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged as onFirebaseAuthStateChanged } from "firebase/auth";
+import { getFirestore, collection, addDoc, query, where, getDocs, serverTimestamp, orderBy } from "firebase/firestore";
+
+// =================================================================================
+// FIREBASE CONFIG
+// =================================================================================
+
+const firebaseConfig = {
+  apiKey: "AIzaSyA_...REPLACE_WITH_YOUR_API_KEY",
+  authDomain: "your-project-id.firebaseapp.com",
+  projectId: "your-project-id",
+  storageBucket: "your-project-id.appspot.com",
+  messagingSenderId: "123456789012",
+  appId: "1:123456789012:web:a1b2c3d4e5f6a7b8c9d0e1"
+};
+
+let auth, db, googleProvider;
+try {
+  const app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+  googleProvider = new GoogleAuthProvider();
+  console.log("Firebase initialized.");
+} catch(e) {
+  console.warn("Firebase not initialized. Please add your config to `firebaseConfig`. Some features like 'Save Trip' will not work.");
+}
+
+
+// =================================================================================
+// SERVICES
+// =================================================================================
+
+// --- firebaseService ---
+const signInWithGoogle = async () => {
+  try {
+    const result = await signInWithPopup(auth, googleProvider);
+    return result.user;
+  } catch (error) {
+    console.error("Error during sign-in:", error);
+    return null;
+  }
+};
+
+const signOutUser = async () => {
+  try {
+    await signOut(auth);
+  } catch (error) {
+    console.error("Error during sign-out:", error);
+  }
+};
+
+const onAuthStateChanged = (callback) => {
+  return onFirebaseAuthStateChanged(auth, (user) => {
+    if (user) {
+      callback({
+        uid: user.uid,
+        displayName: user.displayName,
+        email: user.email,
+      });
+    } else {
+      callback(null);
+    }
+  });
+};
+
+const saveTrip = async (userId, tripPlan) => {
+  try {
+    const docRef = await addDoc(collection(db, "trips"), {
+      ...tripPlan,
+      userId: userId,
+      createdAt: serverTimestamp(),
+    });
+    return docRef.id;
+  } catch (error) {
+    console.error("Error saving trip:", error);
+    throw new Error("Could not save trip to your history.");
+  }
+};
+
+const getTrips = async (userId) => {
+    try {
+        const q = query(collection(db, "trips"), where("userId", "==", userId), orderBy("createdAt", "desc"));
+        const querySnapshot = await getDocs(q);
+        const trips = [];
+        querySnapshot.forEach((doc) => {
+            trips.push({ id: doc.id, ...doc.data() });
+        });
+        return trips;
+    } catch (error) {
+        console.error("Error fetching trips:", error);
+        throw new Error("Could not fetch your saved trips.");
+    }
+};
+
+// --- geminiService ---
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+const commonItinerarySchema = {
+  type: Type.OBJECT,
+  properties: {
+    tripTitle: { type: Type.STRING },
+    totalDuration: { type: Type.INTEGER },
+    estimatedTotalBudget: { type: Type.STRING, description: "An estimated total budget for the entire trip in Indian Rupees, formatted as a range (e.g., '₹10,000 - ₹12,000')." },
+    itinerary: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          day: { type: Type.INTEGER },
+          title: { type: Type.STRING },
+          city: { type: Type.STRING },
+          lat: { type: Type.NUMBER, description: "Latitude of the city for the day." },
+          lng: { type: Type.NUMBER, description: "Longitude of the city for the day." },
+          transport: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                mode: { type: Type.STRING, enum: ['Train', 'Bus', 'Metro', 'Local Bus', 'Ferry', 'Auto Rickshaw', 'Other'] },
+                from: { type: Type.STRING },
+                to: { type: Type.STRING },
+                details: { type: Type.STRING, description: "Detailed information like Bus/Train Number, name of the State Transport Corporation (e.g., KSRTC, MSRTC), type of bus ('Express', 'Ordinary', 'Sleeper'), and specific bus stand/depot names." },
+                price: { type: Type.STRING, description: "Estimated ticket price for the journey, especially for local transport." },
+                bookingLink: { type: Type.STRING, description: "URL to the official government website for booking this transport leg." },
+                departureTime: { type: Type.STRING, description: "The scheduled departure time for the bus or train (e.g., '08:30 AM')." },
+                arrivalTime: { type: Type.STRING, description: "The estimated arrival time for the bus or train (e.g., '01:45 PM')." }
+              },
+              required: ['mode', 'from', 'to', 'details']
+            },
+          },
+          activities: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+        },
+         required: ['day', 'title', 'city', 'lat', 'lng', 'transport', 'activities']
+      },
+    },
+  },
+   required: ['tripTitle', 'totalDuration', 'itinerary', 'estimatedTotalBudget']
+};
+
+
+const parseAndHandleError = (text) => {
+    try {
+        const cleanedText = text.replace(/^```json\s*|```\s*$/g, '');
+        return JSON.parse(cleanedText);
+    } catch (error) {
+        console.error("Failed to parse JSON response from API:", text);
+        throw new Error("The travel plan returned by the AI was in an unexpected format. Please try again.");
+    }
+};
+
+const generateTripPlan = async (from, to, travelStyle, preferences) => {
+    const preferenceText = preferences.includes('Bus') 
+      ? `The user has a strong preference for travelling by Bus. Please prioritize bus routes, especially those from state-run corporations that connect to smaller, less-known destinations.`
+      : `The user is open to all forms of public transport, but the itinerary should still emphasize bus travel to explore India's interior.`;
+    
+    const prompt = `You are an expert travel planner for India, specializing in budget-friendly, off-the-beaten-path itineraries using exclusively public transport. Your focus is on discovering the real India by traveling from villages to deep interior parts via public bus.
+    
+    **CRITICAL INSTRUCTIONS:**
+    1.  **Sequential Plan:** The itinerary must be a clear, step-by-step sequence. When the traveler arrives at a destination, the plan must specify the single, next bus/train to take to continue the journey. Do not list multiple options.
+    2.  **Precise Timings:** For each transport leg, you MUST provide a scheduled 'departureTime' and an estimated 'arrivalTime'. AVOID vague descriptions like 'frequent buses' or 'runs every hour'. If an exact time is not available for a rural bus, provide the best known time slot (e.g., 'Morning, around 9:00 AM').
+    3.  **Bus Details:** For each 'Bus' journey, provide precise details: the name of the state transport corporation (e.g., KSRTC, MSRTC), type of bus (e.g., 'Express', 'Ordinary', 'Sleeper'), and the specific bus stand/depot for departure and arrival.
+    4.  **Public Transport Only:** The itinerary must ONLY use public transport (trains, government buses, local transport). Do NOT include flights or private taxis.
+    5.  **Links:** For each inter-city 'Train' journey, provide a 'bookingLink' to 'https://www.irctc.co.in'.
+    6.  **Budget Calculation:** You MUST calculate and provide an 'estimatedTotalBudget' for the entire trip, considering all costs (transport, food, activities) based on the user's travel style. Present it as a range in Indian Rupees (e.g., '₹10,000 - ₹12,000').
+
+    **USER REQUEST:**
+    Create a detailed, day-by-day itinerary from ${from} to ${to}.
+    The user's preferred travel style is '${travelStyle}'. Based on this, determine an appropriate total duration for the trip.
+    ${preferenceText}
+    For each day, provide the city, its geographic coordinates (lat, lng), and suggest 1-2 budget-friendly activities that reflect local culture.
+    The response must be in JSON format.
+    `;
+
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: commonItinerarySchema,
+            },
+        });
+        return parseAndHandleError(response.text.trim());
+    } catch (error) {
+        console.error("Error generating trip plan:", error);
+        throw new Error("Failed to generate trip plan. The model might be unable to create a route with the given constraints. Please try different locations or styles.");
+    }
+};
+
+
+const generateTransportRoute = async (from, to, preferences) => {
+    const preferenceText = preferences.includes('Bus')
+      ? `The user has a strong preference for travelling by Bus. Please find the most direct and efficient bus route.`
+      : `The user is open to both Train and Bus options.`;
+
+    const prompt = `You are a public transport route specialist for India, with a focus on bus travel. Your task is to find the most efficient route from a starting point to a destination, detailing all necessary changes and transfers.
+
+    **CRITICAL INSTRUCTIONS:**
+    1.  **Multi-Leg Journey:** The route from ${from} to ${to} may require multiple bus or train changes. You MUST detail every single leg of the journey sequentially in the 'transport' array. For example, if a user needs to go from Village A to City C, the plan might include a bus from A to Town B, and then another bus from B to C.
+    2.  **Precise Timings:** For each transport leg, you MUST provide a scheduled 'departureTime' and an estimated 'arrivalTime'. Do not use vague terms like 'frequent service'.
+    3.  **Bus Details:** For each bus, include the state transport corporation name and bus type (e.g., 'Express', 'Ordinary'). For a train, provide the train number.
+    4.  **Links:** Provide a 'bookingLink' to the official government booking website where applicable.
+    5.  **Public Transport Only:** The route must exclusively use public transport like government buses (state-run services) or trains (Indian Railways). Do NOT include flights, private taxis, or ride-sharing.
+    6.  **Single Day Plan:** Present the entire journey as a single-day itinerary. The 'day' property should be 1, and the 'activities' array should be empty.
+    7.  **Budget:** Include an 'estimatedTotalBudget' for the entire end-to-end journey.
+
+    **USER REQUEST:**
+    Find the complete public transport route from ${from} to ${to}.
+    ${preferenceText}
+
+    The response must be in JSON format.
+    `;
+
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: commonItinerarySchema,
+            },
+        });
+
+       return parseAndHandleError(response.text.trim());
+    } catch (error) {
+        console.error("Error generating transport route:", error);
+        throw new Error("Failed to find a transport route. Please check the locations and try again.");
+    }
+};
+
+const refineTripPlan = async (originalPlan, request) => {
+    const prompt = \`You are an expert travel planner for India.
+    Given the existing travel itinerary below, please modify it based on the user's request.
+    
+    **CRITICAL INSTRUCTIONS:**
+    1.  **Adhere to Core Rules:** The itinerary must continue to ONLY use public transport (trains, government buses), with a strong preference for buses that connect to smaller towns and villages.
+    2.  **Maintain Precision:** For each bus journey, provide precise details: state transport corporation, bus type, and specific bus stand names. Provide specific 'departureTime' and 'arrivalTime' for all transport legs.
+    3.  **Handle Breaks:** If the user requests a break or a delay, recalculate the subsequent travel legs with new, realistic timings. For example, if they add a 3-hour break, the next bus departure must be at least 3 hours later than the original plan.
+    4.  **Budget Adjustment:** If the user requests a budget change (e.g., 'Make the budget ₹8,000'), you must re-evaluate all costs. This may involve changing bus types (e.g., from AC to ordinary), suggesting cheaper or free activities, and adjusting daily food estimates. You must also update the 'estimatedTotalBudget' field in the final JSON response to reflect the new budget.
+    5.  **Follow Schema:** Adhere to the exact original JSON format and schema.
+
+    **USER'S REQUEST:** "\${request}"
+
+    **EXISTING ITINERARY (in JSON format):**
+    \${JSON.stringify(originalPlan)}
+    \`;
+
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: commonItinerarySchema,
+            },
+        });
+        return parseAndHandleError(response.text.trim());
+    } catch (error) {
+        console.error("Error refining trip plan:", error);
+        throw new Error("Failed to refine the trip plan. The model might be unable to fulfill the request. Please try a different refinement.");
+    }
+};
+
+const getCityFromCoordinates = async (lat, lng) => {
+    const prompt = \`What is the name of the city and state/country at latitude \${lat} and longitude \${lng}? Respond with only the city and state/country name, in the format "City, State/Country". For example: "Jaipur, Rajasthan" or "Kathmandu, Nepal".\`;
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+        });
+        return response.text.trim();
+    } catch (error) {
+        console.error("Error getting city from coordinates:", error);
+        throw new Error("Could not determine city from your location.");
+    }
+};
+
+// =================================================================================
+// ICON COMPONENTS
+// =================================================================================
+
+const TrainIcon = ({ className = "w-6 h-6" }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+  </svg>
+);
+
+const BusIcon = ({ className = "w-6 h-6" }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.354c-1.39-1.39-2.25-3.236-2.25-5.232 0-1.996.86-3.842 2.25-5.232m0 10.464c1.39-1.39 2.25-3.236 2.25-5.232 0-1.996-.86-3.842-2.25-5.232m0 10.464L12 21m0-18v.01" />
+  </svg>
+);
+
+const LandmarkIcon = ({ className = "w-6 h-6" }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+  </svg>
+);
+
+const GoogleIcon = ({ className = "w-5 h-5" }) => (
+    <svg className={className} viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+        <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12	c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24	c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z" />
+        <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657	C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z" />
+        <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36	c-5.202,0-9.619-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z" />
+        <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.574l6.19,5.238	C42.022,35.54,44,30.134,44,24C44,22.659,43.862,21.35,43.611,20.083z" />
+    </svg>
+);
+
+
+// =================================================================================
+// UI COMPONENTS
+// =================================================================================
+
+const LoadingSpinner = () => {
+  return (
+    <div className="flex flex-col items-center justify-center p-8 text-center bg-white/80 backdrop-blur-sm rounded-lg shadow-lg">
+      <svg className="animate-spin h-12 w-12 text-violet-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+      </svg>
+      <h3 className="mt-4 text-lg font-semibold text-gray-700">Plan Z is Crafting Your Journey...</h3>
+      <p className="mt-1 text-sm text-gray-500">Our digital travel agent is charting the best public routes for you.</p>
+    </div>
+  );
+};
+
+const Header = ({ onGoHome, showBackButton }) => {
+    return (
+        <header className="fixed top-0 left-0 right-0 z-30 bg-white/90 backdrop-blur-sm shadow-sm border-b border-gray-200/80">
+            <nav className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div className="flex items-center justify-between h-20">
+                    <div className="flex items-center">
+                        <button onClick={onGoHome} className="flex-shrink-0 text-3xl font-extrabold text-violet-600 tracking-wider">
+                            Plan Z
+                        </button>
+                    </div>
+                     <div className="flex items-center">
+                        {showBackButton && (
+                            <button 
+                                onClick={onGoHome}
+                                className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                                </svg>
+                                New Plan
+                            </button>
+                        )}
+                    </div>
+                </div>
+            </nav>
+        </header>
+    );
+};
+
+const LoginModal = ({ onLogin, onClose }) => {
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full mx-4 text-center transform transition-all" onClick={e => e.stopPropagation()}>
+        <h3 className="text-2xl font-bold text-gray-800">Save Your Trip</h3>
+        <p className="text-gray-600 mt-2 mb-6">Log in to save this itinerary to your travel history and access it anytime.</p>
+        <button
+          onClick={onLogin}
+          className="w-full inline-flex items-center justify-center gap-3 py-3 px-4 border border-gray-300 rounded-lg shadow-sm text-base font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-violet-500 transition-colors"
+        >
+          <GoogleIcon />
+          Sign in with Google
+        </button>
+         <button
+          onClick={onClose}
+          className="mt-4 text-sm text-gray-500 hover:text-gray-700"
+        >
+          Maybe later
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const HotelBookingModal = ({ city, onClose }) => {
+  const bookingSites = [
+    { name: 'Booking.com', url: `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(city)}` },
+    { name: 'Agoda', url: `https://www.agoda.com/search?city=${encodeURIComponent(city)}` },
+    { name: 'MakeMyTrip', url: `https://www.makemytrip.com/hotels/hotel-listing/?city=${encodeURIComponent(city)}` },
+    { name: 'Goibibo', url: `https://www.goibibo.com/hotels/find-hotels-in-${city.toLowerCase().replace(/\s+/g, '-')}/` }
+  ];
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full mx-4 transform transition-all" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-between items-start">
+            <div>
+                 <h3 className="text-2xl font-bold text-gray-800">Find Hotels in {city}</h3>
+                <p className="text-gray-600 mt-1">Check these popular sites for accommodation.</p>
+            </div>
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-3xl font-bold">&times;</button>
+        </div>
+       
+        <div className="mt-6 space-y-3">
+          {bookingSites.map(site => (
+            <a
+              key={site.name}
+              href={site.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block w-full text-center py-3 px-4 border border-gray-300 rounded-lg shadow-sm text-base font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-violet-500 transition-colors"
+            >
+              Search on {site.name}
+            </a>
+          ))}
+        </div>
+         <button
+          onClick={onClose}
+          className="mt-6 w-full text-sm font-semibold text-gray-600 hover:text-gray-800 bg-gray-100 hover:bg-gray-200 py-2 rounded-lg"
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const BreakModal = ({ day, onClose, onRefine, onShowHotelModal }) => {
+  const [hours, setHours] = useState(2);
+  const [minutes, setMinutes] = useState(0);
+
+  const handleConfirmBreak = () => {
+    let request = `On Day ${day.day} in ${day.city}, add a break of `;
+    if (hours > 0) {
+      request += `${hours} hour${hours > 1 ? 's' : ''}`;
+    }
+    if (minutes > 0) {
+      if (hours > 0) request += ' and ';
+      request += `${minutes} minutes`;
+    }
+    request += '. Then, recalculate the rest of the trip accordingly, updating departure times for subsequent travel.';
+    onRefine(request);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-lg w-full mx-4 transform transition-all" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-between items-start">
+            <div>
+                 <h3 className="text-2xl font-bold text-gray-800">Add a Break in {day.city}</h3>
+                <p className="text-gray-600 mt-1">Select your break duration. The plan will be updated.</p>
+            </div>
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-3xl font-bold">&times;</button>
+        </div>
+
+        <div className="mt-6 space-y-6">
+            <div>
+                <label htmlFor="hours" className="block text-sm font-medium text-gray-700">Hours ({hours})</label>
+                <input
+                    id="hours"
+                    type="range"
+                    min="0"
+                    max="23"
+                    value={hours}
+                    onChange={(e) => setHours(parseInt(e.target.value))}
+                    className="w-full mt-1"
+                />
+            </div>
+            <div>
+                <label htmlFor="minutes" className="block text-sm font-medium text-gray-700">Minutes ({minutes})</label>
+                <input
+                    id="minutes"
+                    type="range"
+                    min="0"
+                    max="45"
+                    step="15"
+                    value={minutes}
+                    onChange={(e) => setMinutes(parseInt(e.target.value))}
+                    className="w-full mt-1"
+                />
+            </div>
+        </div>
+
+        <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <button
+              onClick={() => onShowHotelModal(day.city)}
+              className="w-full text-center py-3 px-4 border border-teal-500 rounded-lg shadow-sm text-base font-semibold text-teal-600 bg-white hover:bg-teal-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-teal-500 transition-colors"
+            >
+              Find Hotels
+            </button>
+             <button
+              onClick={handleConfirmBreak}
+              disabled={hours === 0 && minutes === 0}
+              className="w-full text-center py-3 px-4 border border-transparent rounded-lg shadow-sm text-base font-semibold text-white bg-violet-600 hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-violet-500 disabled:bg-violet-400 transition-colors"
+            >
+              Confirm Break
+            </button>
+        </div>
+
+      </div>
+    </div>
+  );
+};
+
+const MapView = ({ itinerary }) => {
+  const mapContainerRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+
+  useEffect(() => {
+    if (mapContainerRef.current && !mapInstanceRef.current) {
+      const map = L.map(mapContainerRef.current).setView([20.5937, 78.9629], 5);
+      mapInstanceRef.current = map;
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      }).addTo(map);
+    }
+    
+    if (mapInstanceRef.current && itinerary.length > 0) {
+       const map = mapInstanceRef.current;
+        
+      map.eachLayer((layer) => {
+        if (!!layer.toGeoJSON) {
+          map.removeLayer(layer);
+        }
+      });
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      }).addTo(map);
+
+      const locations = itinerary.reduce((acc, day) => {
+        if (!acc.some(loc => loc.city === day.city)) {
+          acc.push({ city: day.city, lat: day.lat, lng: day.lng });
+        }
+        return acc;
+      }, []);
+
+      const latLngs = locations.map(loc => [loc.lat, loc.lng]);
+
+      if (locations.length > 0) {
+        locations.forEach(loc => {
+          L.marker([loc.lat, loc.lng]).addTo(map)
+            .bindPopup(`<b>${loc.city}</b>`);
+        });
+
+        if (latLngs.length > 1) {
+          const polyline = L.polyline(latLngs, { color: 'rgb(139, 92, 246)', weight: 4 }).addTo(map);
+          map.fitBounds(polyline.getBounds().pad(0.2));
+        } else {
+            map.setView(latLngs[0], 8);
+        }
+      }
+    }
+    
+  }, [itinerary]); 
+
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    return () => {
+      if (map) {
+        map.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, []);
+
+  return (
+    <div 
+        ref={mapContainerRef} 
+        className="w-full h-64 md:h-96 rounded-2xl shadow-lg border border-gray-200/80"
+        aria-label="Map showing the trip route"
+    ></div>
+  );
+};
+
+const ItineraryDisplay = ({ plan, onRefine, isLoading }) => {
+  const [refineText, setRefineText] = useState('');
+  const [refineDays, setRefineDays] = useState(plan.totalDuration);
+  const [refineBudget, setRefineBudget] = useState(parseBudget(plan.estimatedTotalBudget));
+  const [user, setUser] = useState(null);
+  const [showLoginModal, setShowLoginModal] = useState(false);
+  const [showHotelModal, setShowHotelModal] = useState(null);
+  const [breakModalInfo, setBreakModalInfo] = useState(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  const getTransportIcon = (mode) => {
+    switch (mode) {
+        case 'Train':
+            return <TrainIcon className="w-6 h-6 text-blue-600" />;
+        case 'Bus':
+        case 'Local Bus':
+            return <BusIcon className="w-6 h-6 text-green-600" />;
+        default:
+            return <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>;
+    }
+  };
+
+  const parseBudget = (budgetStr) => {
+    if (!budgetStr) return 20000;
+    const matches = budgetStr.replace(/,/g, '').match(/\d+/);
+    return matches ? parseInt(matches[0], 10) : 20000;
+  };
+  
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    setRefineDays(plan.totalDuration);
+    setRefineBudget(parseBudget(plan.estimatedTotalBudget));
+  }, [plan]);
+
+  const handleRefineSubmit = (e) => {
+    e.preventDefault();
+    let finalRequest = '';
+    if (refineDays !== plan.totalDuration) {
+        finalRequest += `Change the trip duration to ${refineDays} days. `;
+    }
+    if (refineBudget !== parseBudget(plan.estimatedTotalBudget)) {
+        finalRequest += `Adjust the total budget to be around ₹${refineBudget.toLocaleString('en-IN')}. `;
+    }
+    if (refineText.trim()) {
+        finalRequest += refineText.trim();
+    }
+    
+    if (finalRequest.trim()) {
+      onRefine(plan, finalRequest.trim());
+      setRefineText('');
+    }
+  };
+
+  const handleBreakRefine = (request) => {
+      onRefine(plan, request);
+  };
+  
+  const handleSaveTrip = async () => {
+      if (!user) {
+          setShowLoginModal(true);
+          return;
+      }
+      setIsSaving(true);
+      try {
+          const { id, ...planToSave } = plan;
+          await saveTrip(user.uid, planToSave);
+          setSaveSuccess(true);
+          setTimeout(() => setSaveSuccess(false), 3000);
+      } catch (error) {
+          console.error("Failed to save trip", error);
+          alert("Could not save your trip. Please try again.");
+      } finally {
+          setIsSaving(false);
+      }
+  };
+
+  const handleLogin = async () => {
+      const loggedInUser = await signInWithGoogle();
+      if (loggedInUser) {
+          const formattedUser = { uid: loggedInUser.uid, displayName: loggedInUser.displayName, email: loggedInUser.email };
+          setUser(formattedUser);
+          setShowLoginModal(false);
+          setIsSaving(true);
+            try {
+                const { id, ...planToSave } = plan;
+                await saveTrip(formattedUser.uid, planToSave);
+                setSaveSuccess(true);
+                setTimeout(() => setSaveSuccess(false), 3000);
+            } catch (error) {
+                console.error("Failed to save trip after login", error);
+                alert("Logged in, but could not save your trip. Please try saving again.");
+            } finally {
+                setIsSaving(false);
+            }
+      }
+  };
+
+  return (
+    <div className="w-full max-w-4xl mx-auto p-4 sm:p-6 lg:p-8 space-y-8">
+      {showLoginModal && <LoginModal onLogin={handleLogin} onClose={() => setShowLoginModal(false)} />}
+      {showHotelModal && <HotelBookingModal city={showHotelModal} onClose={() => setShowHotelModal(null)} />}
+      {breakModalInfo && (
+          <BreakModal 
+            day={breakModalInfo} 
+            onClose={() => setBreakModalInfo(null)}
+            onRefine={handleBreakRefine}
+            onShowHotelModal={(city) => {
+                setBreakModalInfo(null);
+                setShowHotelModal(city);
+            }}
+          />
+      )}
+
+      <header className="text-center">
+        <h1 className="text-4xl font-extrabold text-gray-900 tracking-tight">{plan.tripTitle}</h1>
+        <div className="mt-4 flex items-center justify-center gap-6 text-gray-600">
+            <span className="font-semibold">{plan.totalDuration} Days</span>
+            <span className="text-gray-300">|</span>
+            <span className="font-semibold">Estimated Budget: {plan.estimatedTotalBudget}</span>
+        </div>
+      </header>
+      
+      {!plan.id && (
+        <div className="flex justify-center">
+            <button
+                onClick={handleSaveTrip}
+                disabled={isSaving || saveSuccess}
+                className="px-6 py-3 text-base font-semibold text-white bg-violet-600 rounded-lg shadow-md hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-violet-500 disabled:bg-violet-400 disabled:cursor-not-allowed transition-all duration-300"
+            >
+                {isSaving ? 'Saving...' : saveSuccess ? 'Saved!' : 'Save Trip to My History'}
+            </button>
+        </div>
+      )}
+
+      <MapView itinerary={plan.itinerary} />
+      
+      <div className="bg-white p-6 rounded-2xl shadow-lg border border-gray-200/80">
+          <h2 className="text-xl font-bold text-gray-800 mb-4">Refine Your Trip</h2>
+          <form onSubmit={handleRefineSubmit} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                 <div>
+                    <label htmlFor="days" className="block text-sm font-medium text-gray-700">Number of Days ({refineDays})</label>
+                    <input id="days" type="range" min="1" max="30" value={refineDays} onChange={(e) => setRefineDays(parseInt(e.target.value))} className="w-full mt-1" disabled={isLoading} />
+                 </div>
+                 <div>
+                    <label htmlFor="budget" className="block text-sm font-medium text-gray-700">Budget (₹{refineBudget.toLocaleString('en-IN')})</label>
+                    <input id="budget" type="range" min="5000" max="100000" step="1000" value={refineBudget} onChange={(e) => setRefineBudget(parseInt(e.target.value))} className="w-full mt-1" disabled={isLoading} />
+                 </div>
+              </div>
+              <input
+                  type="text"
+                  value={refineText}
+                  onChange={(e) => setRefineText(e.target.value)}
+                  placeholder="e.g., 'Add more temples' or 'Focus on hiking'"
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-violet-500 focus:border-violet-500"
+                  disabled={isLoading}
+              />
+              <button type="submit" disabled={isLoading} className="flex items-center justify-center w-full px-6 py-3 font-semibold text-white bg-violet-600 rounded-lg shadow-md hover:bg-violet-700 disabled:bg-violet-400 disabled:cursor-not-allowed transition-colors">
+                  {isLoading ? (
+                     <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                  ) : 'Refine Plan'}
+              </button>
+          </form>
+      </div>
+      
+      <div className="space-y-6">
+        {plan.itinerary.map((day) => (
+          <div key={day.day} className="bg-white p-6 rounded-2xl shadow-lg border border-gray-200/80">
+            <h3 className="text-2xl font-bold text-gray-800">Day {day.day}: {day.title}</h3>
+            <p className="text-md font-semibold text-violet-700 mb-4">{day.city}</p>
+            
+            <div className="mb-4">
+                <h4 className="text-lg font-semibold text-gray-700 mb-2 border-b pb-1">Transport</h4>
+                <div className="space-y-3">
+                {day.transport.map((t, index) => (
+                    <div key={index} className="flex items-start gap-4 p-3 bg-gray-50 rounded-lg">
+                        <div className="flex-shrink-0 pt-1">{getTransportIcon(t.mode)}</div>
+                        <div>
+                            <p className="font-semibold text-gray-800">{t.mode}: {t.from} to {t.to}</p>
+                            <p className="text-sm text-gray-600">{t.details}</p>
+                            <div className="text-xs text-gray-500 mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                                {t.departureTime && <span>Depart: {t.departureTime}</span>}
+                                {t.arrivalTime && <span>Arrive: {t.arrivalTime}</span>}
+                                {t.price && <span>Price: {t.price}</span>}
+                            </div>
+                            {t.bookingLink && <a href={t.bookingLink} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline mt-1 inline-block">Booking Link</a>}
+                        </div>
+                    </div>
+                ))}
+                </div>
+            </div>
+
+            <div>
+                <h4 className="text-lg font-semibold text-gray-700 mb-2 border-b pb-1 flex items-center gap-2"><LandmarkIcon className="w-5 h-5 text-emerald-600" />Activities</h4>
+                <ul className="list-disc list-inside space-y-1 text-gray-600 pl-2">
+                    {day.activities.map((activity, index) => <li key={index}>{activity}</li>)}
+                </ul>
+            </div>
+            
+            <div className="mt-6 flex flex-col sm:flex-row justify-end items-center gap-3">
+                <button onClick={() => setBreakModalInfo(day)} className="text-sm font-semibold text-violet-600 hover:text-violet-800 bg-violet-100 hover:bg-violet-200 px-4 py-2 rounded-lg shadow-sm transition-colors w-full sm:w-auto">
+                    + Add Break
+                </button>
+                <button onClick={() => setShowHotelModal(day.city)} className="text-sm font-semibold text-white bg-teal-500 hover:bg-teal-600 px-4 py-2 rounded-lg shadow transition-colors w-full sm:w-auto">
+                    Find Hotels in {day.city}
+                </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const History = ({ user, onSelectTrip }) => {
+  const [trips, setTrips] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const fetchTrips = async () => {
+      try {
+        const userTrips = await getTrips(user.uid);
+        setTrips(userTrips);
+      } catch (err) {
+        setError("Failed to load your travel history. Please try again later.");
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchTrips();
+  }, [user.uid]);
+
+  if (isLoading) {
+    return <div className="flex items-center justify-center p-8"><LoadingSpinner /></div>;
+  }
+
+  if (error) {
+    return <div className="text-center p-8 bg-red-100 border border-red-400 text-red-700 rounded-lg shadow-lg max-w-md mx-auto">
+        <h3 className="font-bold text-lg">Error</h3>
+        <p className="mt-2">{error}</p>
+    </div>;
+  }
+
+  return (
+    <div className="w-full max-w-4xl mx-auto p-4 sm:p-6 lg:p-8">
+        <h1 className="text-4xl font-extrabold text-gray-800 tracking-tight text-center mb-8">My Travel History</h1>
+        {trips.length === 0 ? (
+            <div className="text-center bg-white p-8 rounded-xl shadow-lg border border-gray-200/80">
+                <p className="text-gray-600">You have no saved trips yet.</p>
+                <p className="text-sm text-gray-500 mt-1">Go ahead and plan a new adventure to see it here!</p>
+            </div>
+        ) : (
+            <div className="space-y-4">
+                {trips.map(trip => (
+                    <button 
+                        key={trip.id} 
+                        onClick={() => onSelectTrip(trip)}
+                        className="w-full text-left p-6 bg-white rounded-xl shadow-lg border border-gray-200/80 hover:shadow-xl hover:border-violet-300 transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2"
+                    >
+                        <h2 className="text-xl font-bold text-gray-900">{trip.tripTitle}</h2>
+                        <p className="text-md text-violet-600 font-semibold">{trip.totalDuration} Days</p>
+                    </button>
+                ))}
+            </div>
+        )}
+    </div>
+  );
+};
+
+const ModeSelection = ({ onSelectMode }) => {
+    return (
+        <div className="min-h-screen bg-gradient-to-br from-violet-50 via-white to-purple-100 flex items-center justify-center p-4">
+            <div className="p-10 bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl shadow-violet-200/50 border border-violet-100/80 w-full max-w-2xl text-center">
+                <div className="mb-2">
+                    <h1 className="text-5xl font-black bg-gradient-to-r from-violet-600 to-purple-600 bg-clip-text text-transparent tracking-tight">
+                        What's Your Plan?
+                    </h1>
+                    <div className="w-24 h-1.5 bg-gradient-to-r from-violet-400 to-purple-400 rounded-full mx-auto mt-4"></div>
+                </div>
+                
+                <p className="mt-6 text-lg text-gray-600 font-medium">
+                    Choose your journey type. Get a quick route or a full-blown adventure.
+                </p>
+                
+                <div className="mt-12 grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <button
+                        onClick={() => onSelectMode('transport')}
+                        className="group relative p-8 flex flex-col items-center justify-center bg-gradient-to-br from-white to-violet-50 rounded-2xl shadow-xl shadow-violet-100/50 border border-violet-200/60 hover:shadow-2xl hover:shadow-violet-200/70 hover:border-violet-300 transition-all duration-500 transform hover:-translate-y-2 focus:outline-none focus:ring-4 focus:ring-violet-400/30 focus:ring-offset-2 overflow-hidden"
+                    >
+                        <div className="absolute inset-0 bg-gradient-to-br from-transparent via-violet-50/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
+                        <div className="relative z-10 bg-gradient-to-br from-violet-100 to-violet-200 rounded-2xl p-5 transition-all duration-500 group-hover:scale-110 group-hover:shadow-lg group-hover:shadow-violet-200">
+                            <TrainIcon className="w-14 h-14 text-violet-600" />
+                        </div>
+                        <h2 className="relative z-10 mt-6 text-2xl font-bold bg-gradient-to-r from-violet-700 to-violet-800 bg-clip-text text-transparent">
+                            Find Transport
+                        </h2>
+                        <p className="relative z-10 mt-3 text-gray-600 leading-relaxed">
+                            Get the best public transport route from A to B.
+                        </p>
+                        <div className="absolute inset-0 rounded-2xl border-2 border-transparent bg-gradient-to-r from-violet-400 to-purple-400 bg-clip-padding group-hover:opacity-100 opacity-0 transition-opacity duration-500 -m-0.5"></div>
+                    </button>
+
+                    <button
+                        onClick={() => onSelectMode('trip')}
+                        className="group relative p-8 flex flex-col items-center justify-center bg-gradient-to-br from-white to-purple-50 rounded-2xl shadow-xl shadow-purple-100/50 border border-purple-200/60 hover:shadow-2xl hover:shadow-purple-200/70 hover:border-purple-300 transition-all duration-500 transform hover:-translate-y-2 focus:outline-none focus:ring-4 focus:ring-purple-400/30 focus:ring-offset-2 overflow-hidden"
+                    >
+                        <div className="absolute inset-0 bg-gradient-to-br from-transparent via-purple-50/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
+                        <div className="relative z-10 bg-gradient-to-br from-purple-100 to-purple-200 rounded-2xl p-5 transition-all duration-500 group-hover:scale-110 group-hover:shadow-lg group-hover:shadow-purple-200">
+                            <LandmarkIcon className="w-14 h-14 text-purple-600" />
+                        </div>
+                        <h2 className="relative z-10 mt-6 text-2xl font-bold bg-gradient-to-r from-purple-700 to-purple-800 bg-clip-text text-transparent">
+                            Plan a Trip
+                        </h2>
+                        <p className="relative z-10 mt-3 text-gray-600 leading-relaxed">
+                            Create a detailed, multi-day travel itinerary.
+                        </p>
+                        <div className="absolute inset-0 rounded-2xl border-2 border-transparent bg-gradient-to-r from-purple-400 to-violet-400 bg-clip-padding group-hover:opacity-100 opacity-0 transition-opacity duration-500 -m-0.5"></div>
+                    </button>
+                </div>
+
+                <div className="mt-10 flex justify-center space-x-2">
+                    {[1, 2, 3].map((dot) => (
+                        <div
+                            key={dot}
+                            className="w-2 h-2 rounded-full bg-gradient-to-r from-violet-400 to-purple-400 opacity-60"
+                        ></div>
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const TripForm = ({ onSubmit, isLoading }) => {
+  const [from, setFrom] = useState('Delhi');
+  const [to, setTo] = useState('Goa');
+  const [travelStyle, setTravelStyle] = useState('Balanced');
+  const [preferences, setPreferences] = useState(['Train', 'Bus']);
+  const [isLocating, setIsLocating] = useState(false);
+  
+  const transportOptions = ['Train', 'Bus'];
+  const travelStyleOptions = ['Leisurely', 'Balanced', 'Action-Packed', 'Budget-Focused'];
+
+  const handlePreferenceChange = (option) => {
+    setPreferences(prev => 
+      prev.includes(option) 
+        ? prev.filter(p => p !== option) 
+        : [...prev, option]
+    );
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (from && to && travelStyle && preferences.length > 0) {
+      onSubmit(from, to, travelStyle, preferences);
+    }
+  };
+
+  const handleGetCurrentLocation = async () => {
+    if (!navigator.geolocation) {
+      alert("Geolocation is not supported by your browser.");
+      return;
+    }
+
+    setIsLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          const { latitude, longitude } = position.coords;
+          const cityName = await getCityFromCoordinates(latitude, longitude);
+          setFrom(cityName);
+        } catch (error) {
+          console.error(error);
+          alert("Could not determine the city from your location. Please enter it manually.");
+        } finally {
+          setIsLocating(false);
+        }
+      },
+      (error) => {
+        console.error("Geolocation error:", error);
+        alert("Unable to retrieve your location. Please ensure location services are enabled and permissions are granted.");
+        setIsLocating(false);
+      }
+    );
+  };
+
+  const isSubmitDisabled = isLoading || preferences.length === 0;
+
+  return (
+    <form onSubmit={handleSubmit} className="p-8 bg-white/90 backdrop-blur-sm rounded-2xl shadow-2xl border border-gray-200/80 space-y-6 w-full max-w-md">
+      <div className="text-center">
+        <h2 className="text-3xl font-extrabold text-gray-800">Plan a Trip</h2>
+        <p className="text-gray-600 mt-2">Create a detailed, multi-day itinerary.</p>
+      </div>
+      
+      <div className="space-y-4">
+        <div>
+          <label htmlFor="from" className="block text-sm font-medium text-gray-700">From</label>
+           <div className="mt-1 relative">
+            <input
+              type="text"
+              id="from"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              className="block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-violet-500 focus:border-violet-500 sm:text-sm pr-10"
+              placeholder="e.g., New Delhi"
+              required
+            />
+             <div className="absolute inset-y-0 right-0 pr-3 flex items-center">
+                <button 
+                    type="button" 
+                    onClick={handleGetCurrentLocation} 
+                    disabled={isLocating}
+                    className="text-gray-400 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label="Use current location"
+                >
+                    {isLocating ? (
+                        <svg className="animate-spin h-5 w-5 text-violet-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                    ) : (
+                       <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                        </svg>
+                    )}
+                </button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <label htmlFor="to" className="block text-sm font-medium text-gray-700">To</label>
+          <input
+            type="text"
+            id="to"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            className="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-violet-500 focus:border-violet-500 sm:text-sm"
+            placeholder="e.g., Mumbai"
+            required
+          />
+        </div>
+      </div>
+       <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Travel Style</label>
+        <div className="grid grid-cols-2 gap-2">
+            {travelStyleOptions.map(style => (
+                <button type="button" key={style} onClick={() => setTravelStyle(style)} className={`px-3 py-2 text-sm font-medium rounded-lg transition-colors ${travelStyle === style ? 'bg-violet-600 text-white shadow' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+                    {style}
+                </button>
+            ))}
+        </div>
+      </div>
+      
+      <div>
+        <label className="block text-sm font-medium text-gray-700">Preferred Transport</label>
+        <div className="mt-2 grid grid-cols-2 gap-4 rounded-lg bg-gray-50 p-3 border">
+          {transportOptions.map((option) => (
+            <div key={option} className="flex items-center">
+              <input
+                id={`pref-${option}`}
+                name="transportPreference"
+                type="checkbox"
+                checked={preferences.includes(option)}
+                onChange={() => handlePreferenceChange(option)}
+                className="h-4 w-4 rounded border-gray-300 text-violet-600 focus:ring-violet-500"
+              />
+              <label htmlFor={`pref-${option}`} className="ml-3 block text-sm font-medium text-gray-900">
+                {option}
+              </label>
+            </div>
+          ))}
+        </div>
+        {preferences.length === 0 && (
+          <p className="mt-2 text-xs text-red-600">Please select at least one mode of transport.</p>
+        )}
+      </div>
+
+      <button 
+        type="submit" 
+        disabled={isSubmitDisabled}
+        className="w-full flex justify-center items-center py-3 px-4 border border-transparent rounded-lg shadow-sm text-md font-semibold text-white bg-violet-600 hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-violet-500 disabled:bg-violet-400 disabled:cursor-not-allowed transition-transform transform hover:scale-105 duration-200"
+      >
+        {isLoading ? (
+          <>
+            <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Creating Your Adventure...
+          </>
+        ) : 'Generate My Trip'}
+      </button>
+    </form>
+  );
+};
+
+const TransportForm = ({ onSubmit, isLoading }) => {
+  const [from, setFrom] = useState('Mumbai');
+  const [to, setTo] = useState('Pune');
+  const [preferences, setPreferences] = useState(['Train', 'Bus']);
+  const [isLocating, setIsLocating] = useState(false);
+  const [selectedOption, setSelectedOption] = useState(null);
+  
+  const transportOptions = ['Train', 'Bus'];
+
+  const handlePreferenceChange = (option) => {
+    setSelectedOption(option);
+    setPreferences(prev => 
+      prev.includes(option) 
+        ? prev.filter(p => p !== option) 
+        : [...prev, option]
+    );
+    setTimeout(() => setSelectedOption(null), 600);
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (from && to && preferences.length > 0) {
+      onSubmit(from, to, preferences);
+    }
+  };
+
+  const handleGetCurrentLocation = async () => {
+    if (!navigator.geolocation) {
+      alert("Geolocation is not supported by your browser.");
+      return;
+    }
+
+    setIsLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          const { latitude, longitude } = position.coords;
+          const cityName = await getCityFromCoordinates(latitude, longitude);
+          setFrom(cityName);
+        } catch (error) {
+          console.error(error);
+          alert("Could not determine the city from your location. Please enter it manually.");
+        } finally {
+          setIsLocating(false);
+        }
+      },
+      (error) => {
+        console.error("Geolocation error:", error);
+        alert("Unable to retrieve your location. Please ensure location services are enabled and permissions are granted.");
+        setIsLocating(false);
+      }
+    );
+  };
+
+  const isSubmitDisabled = isLoading || preferences.length === 0;
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-violet-50 via-white to-purple-100 flex items-center justify-center p-4 relative overflow-hidden">
+      <div className="absolute inset-0 overflow-hidden">
+        <div className="absolute -top-40 -right-40 w-80 h-80 bg-violet-200/40 rounded-full blur-3xl animate-float-slow"></div>
+        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-purple-200/40 rounded-full blur-3xl animate-float-slow delay-2000"></div>
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-indigo-200/30 rounded-full blur-3xl animate-pulse-slow"></div>
+        <div className="absolute top-1/4 left-1/4 w-3 h-3 bg-violet-300/50 rounded-full animate-float"></div>
+        <div className="absolute top-3/4 right-1/3 w-2 h-2 bg-purple-300/40 rounded-full animate-float delay-1000"></div>
+        <div className="absolute bottom-1/4 left-1/3 w-3 h-3 bg-violet-400/30 rounded-full animate-float delay-1500"></div>
+      </div>
+
+      <form onSubmit={handleSubmit} className="relative z-10 p-8 bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl shadow-violet-200/50 border border-violet-100/80 space-y-8 w-full max-w-md">
+        <div className="text-center">
+          <h2 className="text-4xl font-bold bg-gradient-to-r from-violet-600 to-purple-600 bg-clip-text text-transparent">
+            Find Transport
+          </h2>
+          <p className="text-gray-600 mt-3 text-lg">Get the best route from A to B</p>
+          <div className="w-24 h-1.5 bg-gradient-to-r from-violet-400 to-purple-400 rounded-full mx-auto mt-4"></div>
+        </div>
+        
+        <div className="space-y-6">
+          <div>
+            <label htmlFor="from-transport" className="block text-lg font-semibold text-gray-700 mb-3">From</label>
+            <div className="relative">
+              <input type="text" id="from-transport" value={from} onChange={(e) => setFrom(e.target.value)}
+                className="block w-full px-5 py-4 text-lg bg-white border-2 border-gray-200 rounded-2xl shadow-sm placeholder-gray-400 focus:outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-200 transition-all duration-300 transform hover:scale-105"
+                placeholder="e.g., New Delhi" required />
+              <div className="absolute inset-y-0 right-0 pr-4 flex items-center">
+                <button type="button" onClick={handleGetCurrentLocation} disabled={isLocating}
+                  className="text-violet-500 hover:text-violet-700 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-300 transform hover:scale-110"
+                  aria-label="Use current location" >
+                  {isLocating ? (
+                    <div className="flex space-x-1">
+                      <div className="w-2 h-2 bg-violet-500 rounded-full animate-bounce"></div>
+                      <div className="w-2 h-2 bg-violet-500 rounded-full animate-bounce delay-150"></div>
+                      <div className="w-2 h-2 bg-violet-500 rounded-full animate-bounce delay-300"></div>
+                    </div>
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+          <div>
+            <label htmlFor="to-transport" className="block text-lg font-semibold text-gray-700 mb-3">To</label>
+            <input type="text" id="to-transport" value={to} onChange={(e) => setTo(e.target.value)}
+              className="block w-full px-5 py-4 text-lg bg-white border-2 border-gray-200 rounded-2xl shadow-sm placeholder-gray-400 focus:outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-200 transition-all duration-300 transform hover:scale-105"
+              placeholder="e.g., Goa" required />
+          </div>
+        </div>
+        
+        <div>
+          <label className="block text-lg font-semibold text-gray-700 mb-4">Preferred Transport</label>
+          <div className="grid grid-cols-2 gap-4 rounded-2xl bg-gray-50/80 p-5 border border-gray-200">
+            {transportOptions.map((option) => (
+              <div key={option} className={`relative transition-all duration-500 ${selectedOption === option ? 'animate-option-pop' : ''}`}>
+                <button type="button" onClick={() => handlePreferenceChange(option)}
+                  className={`w-full flex items-center justify-center p-4 rounded-xl border-2 transition-all duration-300 transform hover:scale-105 ${
+                    preferences.includes(option)
+                      ? 'bg-gradient-to-br from-violet-500 to-purple-500 text-white border-transparent shadow-lg shadow-violet-200 scale-110'
+                      : 'bg-white text-gray-700 border-gray-300 hover:border-violet-300 hover:shadow-md'
+                  }`} >
+                  <span className="text-lg font-semibold">{option}</span>
+                </button>
+                {selectedOption === option && (
+                  <>
+                    <div className="absolute inset-0 rounded-xl bg-gradient-to-br from-violet-400 to-purple-400 animate-ping opacity-60"></div>
+                    <div className="absolute -inset-1 rounded-xl bg-gradient-to-br from-violet-300 to-purple-300 opacity-30 animate-pulse"></div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+          {preferences.length === 0 && (
+            <p className="mt-3 text-base text-red-500 font-medium animate-pulse">Please select at least one mode of transport</p>
+          )}
+        </div>
+
+        <button type="submit" disabled={isSubmitDisabled}
+          className="w-full flex justify-center items-center py-5 px-6 border border-transparent rounded-2xl text-xl font-bold text-white bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600 focus:outline-none focus:ring-4 focus:ring-violet-200 disabled:from-gray-400 disabled:to-gray-400 disabled:cursor-not-allowed transition-all duration-500 transform hover:scale-105 hover:shadow-2xl hover:shadow-violet-300 relative overflow-hidden group"
+        >
+          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent -skew-x-12 transform translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></div>
+          <span className="relative z-10 flex items-center">
+            {isLoading ? (
+              <>
+                <svg className="animate-spin -ml-1 mr-4 h-6 w-6 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Finding Route...
+              </>
+            ) : (
+              <>
+                <svg className="w-6 h-6 mr-3 transition-transform duration-300 group-hover:scale-110" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+                Find Route
+              </>
+            )}
+          </span>
+        </button>
+
+        <div className="flex justify-center space-x-3">
+          {[1, 2, 3, 4].map((dot) => (
+            <div key={dot}
+              className="w-2 h-2 rounded-full bg-gradient-to-r from-violet-400 to-purple-400 opacity-60"
+            ></div>
+          ))}
+        </div>
+      </form>
+      <style>{`
+        @keyframes float { 0%, 100% { transform: translateY(0px) rotate(0deg); } 50% { transform: translateY(-20px) rotate(180deg); } }
+        @keyframes float-slow { 0%, 100% { transform: translateY(0px) scale(1); } 50% { transform: translateY(-40px) scale(1.1); } }
+        @keyframes pulse-slow { 0%, 100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.05); } }
+        @keyframes option-pop { 0% { transform: scale(1); } 50% { transform: scale(1.15); } 100% { transform: scale(1.1); } }
+        .animate-float { animation: float 6s ease-in-out infinite; }
+        .animate-float-slow { animation: float-slow 8s ease-in-out infinite; }
+        .animate-pulse-slow { animation: pulse-slow 4s ease-in-out infinite; }
+        .animate-option-pop { animation: option-pop 0.6s ease-out forwards; }
+      `}</style>
+    </div>
+  );
+};
+
+// =================================================================================
+// MAIN APP COMPONENT
+// =================================================================================
+
+const App = () => {
+  const [view, setView] = useState('selection');
+  const [currentTripPlan, setCurrentTripPlan] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleTripPlanRequest = useCallback(async (from, to, travelStyle, preferences) => {
+    setIsLoading(true);
+    setError(null);
+    setCurrentTripPlan(null);
+    try {
+      const plan = await generateTripPlan(from, to, travelStyle, preferences);
+      setCurrentTripPlan(plan);
+      setView('itinerary');
+    } catch (err) {
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("An unknown error occurred.");
+      }
+      setView('tripForm');
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+  
+  const handleTransportRouteRequest = useCallback(async (from, to, preferences) => {
+    setIsLoading(true);
+    setError(null);
+    setCurrentTripPlan(null);
+    try {
+      const plan = await generateTransportRoute(from, to, preferences);
+      setCurrentTripPlan(plan);
+      setView('itinerary');
+    } catch (err) {
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("An unknown error occurred.");
+      }
+      setView('transportForm');
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const handleRefineTripPlan = useCallback(async (currentPlan, request) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const newPlan = await refineTripPlan(currentPlan, request); 
+      setCurrentTripPlan(newPlan);
+      setView('itinerary');
+    } catch (err) {
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("An unknown error occurred.");
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const handleGoHome = () => {
+    setView('selection');
+    setCurrentTripPlan(null);
+    setError(null);
+  };
+  
+  const renderContent = () => {
+    const currentFormView = view === 'tripForm' ? 'tripForm' : 'transportForm';
+
+    if (isLoading && !currentTripPlan) {
+      return <div className="flex items-center justify-center p-8"><LoadingSpinner /></div>;
+    }
+     if (error && !currentTripPlan) {
+      return (
+        <div className="flex flex-col items-center justify-center gap-4">
+            <div className="text-center p-8 bg-red-100 border border-red-400 text-red-700 rounded-lg shadow-lg max-w-md mx-auto">
+                <h3 className="font-bold text-lg">Oops, something went wrong!</h3>
+                <p className="mt-2">{error}</p>
+            </div>
+            <button onClick={() => { setError(null); setView(currentFormView); }} className="text-sm font-semibold text-violet-700 hover:underline">
+                Try again
+            </button>
+        </div>
+      );
+    }
+
+    switch (view) {
+        case 'selection':
+            return <ModeSelection onSelectMode={(mode) => setView(mode === 'trip' ? 'tripForm' : 'transportForm')} />;
+        case 'tripForm':
+            return <div className="flex items-center justify-center"><TripForm onSubmit={handleTripPlanRequest} isLoading={isLoading} /></div>;
+        case 'transportForm':
+            return <div className="flex items-center justify-center"><TransportForm onSubmit={handleTransportRouteRequest} isLoading={isLoading} /></div>;
+        case 'itinerary':
+            return currentTripPlan && <ItineraryDisplay plan={currentTripPlan} onRefine={handleRefineTripPlan} isLoading={isLoading} />;
+        default:
+             return <ModeSelection onSelectMode={(mode) => setView(mode === 'trip' ? 'tripForm' : 'transportForm')} />;
+    }
+  };
+
+  return (
+    <main className="min-h-screen w-full relative">
+       <div className="absolute top-0 left-0 w-full h-full app-background opacity-10"></div>
+       <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-violet-50/70 via-white/60 to-violet-100/70"></div>
+       <Header 
+         onGoHome={handleGoHome}
+         showBackButton={view !== 'selection'}
+       />
+       <div className="relative z-10 w-full min-h-screen flex items-center justify-center pt-24 pb-12">
+        {error && currentTripPlan && (
+            <div className="fixed top-24 left-1/2 -translate-x-1/2 z-50 w-full max-w-md p-4">
+                 <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg shadow-lg relative" role="alert">
+                    <strong className="font-bold">Refinement Error: </strong>
+                    <span className="block sm:inline">{error}</span>
+                    <span className="absolute top-0 bottom-0 right-0 px-4 py-3" onClick={() => setError(null)}>
+                        <svg className="fill-current h-6 w-6 text-red-500" role="button" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><title>Close</title><path d="M14.348 14.849a1.2 1.2 0 0 1-1.697 0L10 11.819l-2.651 3.029a1.2 1.2 0 1 1-1.697-1.697l2.758-3.15-2.759-3.152a1.2 1.2 0 1 1 1.697-1.697L10 8.183l2.651-3.031a1.2 1.2 0 1 1 1.697 1.697l-2.758 3.152 2.758 3.15a1.2 1.2 0 0 1 0 1.698z"/></svg>
+                    </span>
+                </div>
+            </div>
+        )}
+        {renderContent()}
+      </div>
+    </main>
+  );
+};
+
+
+// =================================================================================
+// RENDER THE APP
+// =================================================================================
+
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+    </script>
   </body>
 </html>
