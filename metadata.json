@@ -1,0 +1,5 @@
+{
+  "name": "Plan Z",
+  "description": "An application that generates detailed trip itineraries for travel within India using only public transportation, powered by the Gemini API.",
+  "requestFramePermissions": []
+}
