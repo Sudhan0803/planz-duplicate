@@ -227,7 +227,8 @@ const TransportForm: React.FC<TransportFormProps> = ({ onSubmit, isLoading }) =>
       </form>
 
       {/* Custom Animations */}
-      <style jsx>{`
+      {/* Fix: Removed non-standard 'jsx' attribute from style tag. */}
+      <style>{`
         @keyframes float {
           0%, 100% { transform: translateY(0px) rotate(0deg); }
           50% { transform: translateY(-20px) rotate(180deg); }
